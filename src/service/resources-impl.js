@@ -281,14 +281,13 @@ export class Resources {
   }
 
   /**
-   * Returns a subset of resources which are (1) belong to the specified host
-   * window, and (2) positioned in the specified rect.
+   *
    * @param {!Window} hostWin
-   * @param {!../layout-rect.LayoutRectDef} rect
-   * @param {boolean=} opt_isInPrerender signifies if we are in prerender mode.
+   * @param {!function(!Resource):bool} filterFn
    * @return {!Promise<!Array<!Resource>>}
    */
-  getResourcesInRect(hostWin, rect, opt_isInPrerender) {
+  getMeasuredResources(hostWin, filterFn) {
+    console.log('getMeasuredResources', hostWin);
     // First, wait for the `ready-scan` signal. Waiting for each element
     // individually is too expensive and `ready-scan` will cover most of
     // the initially parsed elements.
@@ -297,7 +296,9 @@ export class Resources {
     return this.ampdoc.signals().whenSignal(READY_SCAN_SIGNAL_).then(() => {
       // Second, wait for any left-over elements to complete measuring.
       const measurePromiseArray = [];
+      console.log('resources count', this.resources_.length);
       this.resources_.forEach(r => {
+        console.log('within getMeasuredResources', r.hasBeenMeasured(), r.hostWin == hostWin, r.hasOwner());
         if (!r.hasBeenMeasured() &&
             r.hostWin == hostWin &&
             !r.hasOwner()) {
@@ -305,23 +306,28 @@ export class Resources {
         }
       });
       return Promise.all(measurePromiseArray);
-    }).then(() => {
-      // Finally, filter visible resources.
-      return this.resources_.filter(r => {
-        if (r.hostWin != hostWin ||
-            r.hasOwner() ||
-            !r.hasBeenMeasured() ||
-            !r.isDisplayed() ||
-            // TODO(jridgewell): Remove isFixed check here once the position
-            // is calculted correctly in a separate layer for embeds.
-            (!r.overlaps(rect) && !r.isFixed())) {
-          return false;
-        }
-        if (opt_isInPrerender && !r.prerenderAllowed()) {
-          return false;
-        }
-        return true;
-      });
+    }).then(() => this.resources_.filter(r =>
+        r.hostWin == hostWin && !r.hasOwner() && r.hasBeenMeasured() &&
+        filterFn(r)));
+  }
+
+  /**
+   * Returns a subset of resources which are (1) belong to the specified host
+   * window, and (2) positioned in the specified rect.
+   * @param {!Window} hostWin
+   * @param {!../layout-rect.LayoutRectDef} rect
+   * @param {boolean=} opt_isInPrerender signifies if we are in prerender mode.
+   * @return {!Promise<!Array<!Resource>>}
+   */
+  getResourcesInRect(hostWin, rect, opt_isInPrerender) {
+    return this.getMeasuredResources(hostWin, (r) => {
+      // TODO(jridgewell): Remove isFixed check here once the position
+      // is calculted correctly in a separate layer for embeds.
+      if (!r.isDisplayed() || (!r.overlaps(rect) && !r.isFixed()) ||
+          (opt_isInPrerender && !r.prerenderAllowed())) {
+        return false;
+      }
+      return true;
     });
   }
 

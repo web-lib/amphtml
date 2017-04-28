@@ -43,18 +43,9 @@
 <body>
   <h1>A4A Examples</h1>
 
-  <h2>Fake ad network</h2>
-  <amp-ad width="300" height="400"
-      type="fake"
-      data-use-a4a="true"
-      data-vars-analytics-var="bar"
-      src="fake_amp.json">
-    <div placeholder></div>
-    <div fallback></div>
-  </amp-ad>
 
   <h2>TripleLift ad network</h2>
-  <amp-ad width="297" height="410"
+  <amp-ad id="foo1" width="297" height="410"
       type="triplelift"
       data-use-a4a="true"
       src="https://ib.3lift.com/ttj?inv_code=ampforadstest_main_feed">
@@ -62,15 +53,14 @@
     <div fallback></div>
   </amp-ad>
 
-  <h2>Fake cloudflare as ad network ad</h2>
-  <amp-ad width="300" height="150"
-      type="cloudflare"
-      data-cf-network="cloudflare"
-      data-cf-a4a="true"
-      src="/fake_a4a.json.html">
+  <amp-ad id="foo2" width="297" height="410"
+      type="triplelift"
+      data-use-a4a="true"
+      src="https://ib.3lift.com/ttj?inv_code=ampforadstest_main_feed2">
     <div placeholder></div>
     <div fallback></div>
   </amp-ad>
+
 
 </body>
 </html>

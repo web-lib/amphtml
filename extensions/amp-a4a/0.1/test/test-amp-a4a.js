@@ -1669,6 +1669,61 @@ describe('amp-a4a', () => {
     });
   });
 
+  describe.only('SRA', () => {
+    let fixture;
+    let win;
+    let sandbox;
+
+    beforeEach(() => {
+      return createIframePromise().then(f => {
+        sandbox = sinon.sandbox.create();
+        setupForAdTesting(f);
+        fixture = f;
+        win = fixture.win;
+        return fixture;
+      });
+    });
+
+    it('single element', () => {
+      const adUrl = 'https://foo.com?some=adurl';
+      const sraAdUrl = 'https://sra-foo.com?some=sraAdUrl';
+      const mockResponse = {
+        arrayBuffer: function() {
+          return utf8Encode(validCSSAmp.reserialized);
+        },
+        bodyUsed: false,
+        headers: new FetchResponseHeaders({
+          getResponseHeader(name) {
+            return headers[name];
+          },
+        }),
+        catch: callback => callback()
+      };
+      const a4aElement = createA4aElement(fixture.doc);
+      const a4a = new MockA4AImpl(a4aElement);
+      sandbox.stub(a4a, 'getAdUrl').returns(adUrl);
+      sandbox.stub(a4a, 'shouldUseSra').returns(true);
+      const constructObj = {};
+      constructObj[sraAdUrl] = [adUrl];
+      sandbox.stub(a4a, 'constructSraRequestUrls').returns(constructObj);
+      xhrMock.withArgs(sraAdUrl, {
+        mode: 'cors',
+        method: 'GET',
+        credentials: 'include',
+      }).returns(Promise.resolve(mockResponse));
+      sandbox.stub(a4a, 'processSraResponse').returns(mockResponse);
+      a4a.connectedCallback();
+      a4a.onLayoutMeasure();
+      return a4a.layoutCallback().then(() => {
+        const child = a4aElement.querySelector('iframe[srcdoc]');
+        expect(child).to.be.ok;
+        expect(child).to.be.visible;
+        expect(onCreativeRenderSpy.withArgs(true)).to.be.called;
+        console.log(child.getAttribute('srcdoc'));
+      });
+    });
+  });
+
   // TODO(tdrl): Other cases to handle for parsing JSON metadata:
   //   - Metadata tag(s) missing
   //   - JSON parse failure

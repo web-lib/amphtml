@@ -53,6 +53,7 @@ import {
   installUrlReplacementsForEmbed,
 } from '../../../src/service/url-replacements-impl';
 import {extensionsFor} from '../../../src/services';
+import {resourcesForDoc} from '../../../src/services';
 import {A4AVariableSource} from './a4a-variable-source';
 // TODO(tdrl): Temporary.  Remove when we migrate to using amp-analytics.
 import {getTimingDataAsync} from '../../../src/service/variable-source';
@@ -330,6 +331,12 @@ export class AmpA4A extends AMP.BaseElement {
      * {?HTMLIframeElement}
      */
     this.iframe = null;
+
+    /**
+     * Whether element will use SRA, evaluated within onLayoutMeasure.
+     * @private {boolean}
+     */
+    this.usesSra_ = false;
   }
 
   /** @override */
@@ -419,11 +426,71 @@ export class AmpA4A extends AMP.BaseElement {
     }
   }
 
+  /**
+   * SRA Flow is:
+   * - Create single promise executor per window/type
+   * - Wait on measured resources filtering on amp-ad/type that use SRA
+   * - Wait on ad url generation
+   * - Generate SRA url to array of relevant per element urls
+   * - Flatten into element ad url to send SRA request + process response
+   *    promise
+   * Assumes that ad url is unique across elements!
+   * @return {!Promise<!Object<string, Response>>} promise to object mapping
+   *    of ad url to its response object.
+   * @private
+   */
+  getSraElementResponsePromise_() {
+    // TODO(keithwrightbos) - how do we reset state from unlayoutCallback?
+    const winVar = `sra_promise_${this.element.getAttribute('type')}`;
+    this.win[winVar] = this.win[winVar] || (() => {
+      return resourcesForDoc(this.element).getMeasuredResources(this.win,
+        (r) => {
+          console.log('filtering', e);
+          return r.element.tagName == 'AMP-AD' &&
+          r.element.getAttribute('type') == this.element.getAttribute('type');
+        })
+      .then(resources => {
+        dev().assert(resources.length);
+        const adUrlPromiseArray = [];
+        resources.forEach((r) => {
+          console.log('resource', r);
+          // wait for getAdUrl to execute for each that uses sra.
+          if (r.useSra_) {
+            adUrlPromiseArray.push(r.adUrlsPromise_);
+          }
+        });
+        console.log('adUrlPromiseArray', adUrlPromiseArray);
+        // TODO: what if there's only 1 slot on the page?!
+        return Promise.all(adUrlPromiseArray).then(adUrls => {
+          const sraUrlsToAdUrls = this.constructSraRequestUrls(adUrls);
+          // structure is ad url to SRA response promise.
+          const result = {};
+          Object.keys(sraUrlsToAdUrls).forEach(sraAdUrl => {
+            const sraRequestedAdUrls = sraUrlsToAdUrls[sraAdUrl];
+            const getElementResponsePromise =
+              this.sendXhrRequest_(sraAdUrl, sraRequestedAdUrls.length)
+              .then(response =>
+                this.processSraResponse(sraRequestedAdUrls, response));
+            sraRequestedAdUrls.forEach(elementAdUrl => {
+              result[elementAdUrl] = getElementResponsePromise;
+            });
+          })
+          return result;
+        });
+      });
+    })();
+    return this.win[winVar];
+  }
+
   /** @override */
   onLayoutMeasure() {
     if (this.xOriginIframeHandler_) {
       this.xOriginIframeHandler_.onLayoutMeasure();
     }
+    let adUrlPromiseResolver = null;
+    this.adUrlsPromise_ = new Promise(resolve => {
+      adUrlPromiseResolver = resolve;
+    });
     if (this.layoutMeasureExecuted_ ||
         !this.crypto_.isCryptoAvailable()) {
       // onLayoutMeasure gets called multiple times.
@@ -466,11 +533,17 @@ export class AmpA4A extends AMP.BaseElement {
     if (getMode().localDev &&
         this.element.getAttribute('type') == 'fake' &&
         this.element.getAttribute('force3p') == 'true') {
-      this.adUrl_ = this.getAdUrl();
-      this.adPromise_ = Promise.resolve();
+      this.adPromise_ = this.getAdUrl().then(adUrl => {
+        this.adUrl_ = adUrl;
+      });
       return;
     }
 
+    const sraPromise = this.useSra_ = this.shouldUseSra() ?
+      this.getSraElementResponsePromise_().then(adUrlToResponse => {
+        dev().assert(this.adUrl_);
+        return adUrlToResponse[this.adUrl_];
+      }) : null;
     // Return value from this chain: True iff rendering was "successful"
     // (i.e., shouldn't try to render later via iframe); false iff should
     // try to render later in iframe.
@@ -495,15 +568,16 @@ export class AmpA4A extends AMP.BaseElement {
         .then(adUrl => {
           checkStillCurrent(promiseId);
           this.adUrl_ = adUrl;
+          adUrlPromiseResolver();
           this.protectedEmitLifecycleEvent_('urlBuilt');
-          return adUrl && this.sendXhrRequest_(adUrl);
+          return adUrl && (sraPromise || this.sendXhrRequest_(adUrl));
         })
         // The following block returns either the response (as a {bytes, headers}
         // object), or null if no response is available / response is empty.
         /** @return {?Promise<?{bytes: !ArrayBuffer, headers: !Headers}>} */
         .then(fetchResponse => {
           checkStillCurrent(promiseId);
-          this.protectedEmitLifecycleEvent_('adRequestEnd');
+          this.protectedEmitLifecycleEvent_((sraPromise ? 'sraA' : 'a') + 'dRequestEnd');
           // If the response is null, we want to return null so that
           // unlayoutCallback will attempt to render via x-domain iframe,
           // assuming ad url or creative exist.
@@ -926,6 +1000,41 @@ export class AmpA4A extends AMP.BaseElement {
     throw new Error('extractCreativeAndSignature not implemented!');
   }
 
+
+  /**
+   * Indicates where SRA should be used for this element. To be overridden by
+   * concrete implementations with false as the default.  Will be called as part
+   * of onLayoutMeasure execution.
+   * @return {boolean} whether SRA should be used.
+   */
+  shouldUseSra() {
+    return false;
+  }
+
+  /**
+   * Constructs SRA requests given ad url for each element that returned true
+   * for shouldUseSra.  Allows for grouping into separate SRA requests where
+   * processSraResponse will be called for each SRA ad url response.
+   * @param {!Array<string>} adUrls of elements associated with SRA request.
+   * @return {!Object<string, !Array<string>>} object mapping
+   *    of SRA request url to urls of associated elements.
+   */
+  constructSraRequestUrls(adUrls) {
+    throw new Error('constructSraRequestUrl not implemented!');
+  }
+
+  /**
+   * Generate per element response objects based on SRA response.
+   * TODO(keithwrightbos): error handling for SRA response?
+   * @param {!Array<string>} adUrls of elements associted with SRA request.
+   * @param {Response} sraResponse response generated via url above.
+   * @return {!Promise<!Object<string, !Response>>} element ad url to its
+   *    response.
+   */
+  processSraResponse(adUrls, response) {
+    throw new Error('processSraResponse not implemented!');
+  }
+
   /**
    * Forces the UI Handler to collapse this slot.
    * @visibleForTesting
@@ -964,11 +1073,17 @@ export class AmpA4A extends AMP.BaseElement {
   /**
    * Send ad request, extract the creative and signature from the response.
    * @param {string} adUrl Request URL to send XHR to.
+   * @param {number=} sraElements for SRA requests, number of elements.
    * @return {!Promise<?../../../src/service/xhr-impl.FetchResponse>}
    * @private
    */
-  sendXhrRequest_(adUrl) {
-    this.protectedEmitLifecycleEvent_('adRequestStart');
+  sendXhrRequest_(adUrl, sraElements) {
+    if (sraElements != undefined) {
+      this.protectedEmitLifecycleEvent_(
+          'sraAdRequestStart', {'elements': sraElements});
+    } else {
+      this.protectedEmitLifecycleEvent_('adRequestStart');
+    }
     const xhrInit = {
       mode: 'cors',
       method: 'GET',
