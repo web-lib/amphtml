@@ -137,6 +137,14 @@ let CryptoKeysDef;
  */
 let AllServicesCryptoKeysDef;
 
+/**
+ * Per element network response.
+ * @typedef {creative: ?ArrayBuffer,
+ *           status: number,
+ *           headers: ../../../src/service/xhr-impl.FetchResponseHeaders=}
+ */
+let NetworkResponse;
+
 /** @private */
 export const LIFECYCLE_STAGES = {
   // Note: Use strings as values here, rather than numbers, so that "0" does
@@ -168,7 +176,10 @@ export const LIFECYCLE_STAGES = {
   firstVisible: '24',
   visLoadAndOneSec: '25',
   iniLoad: '26',
+  resumeCallback: '27',
 };
+
+let sraMeasuredPromise;
 
 /**
  * Utility function that ensures any error thrown is handled by optional
@@ -243,9 +254,6 @@ export class AmpA4A extends AMP.BaseElement {
     /** @private {?AMP.AmpAdXOriginIframeHandler} */
     this.xOriginIframeHandler_ = null;
 
-    /** @private {boolean} whether layoutMeasure has been executed. */
-    this.layoutMeasureExecuted_ = false;
-
     /** @const @private {!../../../src/service/vsync-impl.Vsync} */
     this.vsync_ = this.getVsync();
 
@@ -281,6 +289,9 @@ export class AmpA4A extends AMP.BaseElement {
       width: this.element.getAttribute('width'),
       height: this.element.getAttribute('height'),
     };
+
+    /** @private {?../../../src/layout-rect.LayoutRectDef} */
+    this.originalSlotSize_ = null;
 
     /**
      * Note(keithwrightbos) - ensure the default here is null so that ios
@@ -337,6 +348,13 @@ export class AmpA4A extends AMP.BaseElement {
      * @private {boolean}
      */
     this.usesSra_ = false;
+
+    /**
+     * TODO(keithwrightbos) - remove once resume behavior is verified.
+     * {boolean} whether most recent ad request was generated as part
+     *    of resume callback.
+     */
+    this.fromResumeCallback = false;
   }
 
   /** @override */
@@ -441,36 +459,34 @@ export class AmpA4A extends AMP.BaseElement {
    */
   getSraElementResponsePromise_() {
     // TODO(keithwrightbos) - how do we reset state from unlayoutCallback?
-    const winVar = `sra_promise_${this.element.getAttribute('type')}`;
-    this.win[winVar] = this.win[winVar] || (() => {
+    sraMeasuredPromise = sraMeasuredPromise || (() => {
       return resourcesForDoc(this.element).getMeasuredResources(this.win,
         (r) => {
-          console.log('filtering', e);
           return r.element.tagName == 'AMP-AD' &&
-          r.element.getAttribute('type') == this.element.getAttribute('type');
+            r.element.getAttribute('type') == this.element.getAttribute('type');
         })
       .then(resources => {
         dev().assert(resources.length);
-        const adUrlPromiseArray = [];
-        resources.forEach((r) => {
-          console.log('resource', r);
-          // wait for getAdUrl to execute for each that uses sra.
-          if (r.useSra_) {
-            adUrlPromiseArray.push(r.adUrlsPromise_);
-          }
-        });
-        console.log('adUrlPromiseArray', adUrlPromiseArray);
+        const getAdUrlsPromise = [];
+        resources.forEach(r => getAdUrlsPromise.push(r.element.getImpl().then(
+          instance => {
+            console.log('instance', instance);
+            return instance.adUrlsPromise_;
+          })));
+        console.log('getAdUrlsPromise', getAdUrlsPromise);
         // TODO: what if there's only 1 slot on the page?!
-        return Promise.all(adUrlPromiseArray).then(adUrls => {
-          const sraUrlsToAdUrls = this.constructSraRequestUrls(adUrls);
+        return Promise.all(getAdUrlsPromise).then(adUrls => {
+          // Remove null items as they indicate lack of SRA support.
+          const sraUrlsToAdUrls =
+            this.constructSraRequestUrls(adUrls.filter(adUrl => !!adUrl));
           // structure is ad url to SRA response promise.
           const result = {};
           Object.keys(sraUrlsToAdUrls).forEach(sraAdUrl => {
             const sraRequestedAdUrls = sraUrlsToAdUrls[sraAdUrl];
             const getElementResponsePromise =
               this.sendXhrRequest_(sraAdUrl, sraRequestedAdUrls.length)
-              .then(response =>
-                this.processSraResponse(sraRequestedAdUrls, response));
+              .then(response => this.processSraResponse(
+                sraRequestedAdUrls, response));
             sraRequestedAdUrls.forEach(elementAdUrl => {
               result[elementAdUrl] = getElementResponsePromise;
             });
@@ -479,33 +495,42 @@ export class AmpA4A extends AMP.BaseElement {
         });
       });
     })();
-    return this.win[winVar];
+    return sraMeasuredPromise;
   }
 
   /** @override */
-  onLayoutMeasure() {
-    if (this.xOriginIframeHandler_) {
-      this.xOriginIframeHandler_.onLayoutMeasure();
+  resumeCallback() {
+    this.protectedEmitLifecycleEvent_('resumeCallback');
+    this.fromResumeCallback = true;
+    // If layout of page has not changed, onLayoutMeasure will not be called
+    // so do so explicitly.
+    const resource =
+      this.element.getResources().getResourceForElement(this.element);
+    if (resource.hasBeenMeasured() && !resource.isMeasureRequested()) {
+      this.onLayoutMeasure();
     }
-    let adUrlPromiseResolver = null;
-    this.adUrlsPromise_ = new Promise(resolve => {
-      adUrlPromiseResolver = resolve;
-    });
-    if (this.layoutMeasureExecuted_ ||
-        !this.crypto_.isCryptoAvailable()) {
-      // onLayoutMeasure gets called multiple times.
-      return;
+  }
+
+  /**
+   * @return {boolean} whether environment/element should initialize ad request
+   *    promise chain.
+   * @private
+   */
+  shouldInitializePromiseChain_() {
+    if (!this.crypto_.isCryptoAvailable()) {
+      return false;
     }
     const slotRect = this.getIntersectionElementLayoutBox();
     if (slotRect.height == 0 || slotRect.width == 0) {
       dev().fine(
         TAG, 'onLayoutMeasure canceled due height/width 0', this.element);
-      return;
+      return false;
     }
-    user().assert(isAdPositionAllowed(this.element, this.win),
-        '<%s> is not allowed to be placed in elements with ' +
-        'position:fixed: %s', this.element.tagName, this.element);
-    this.layoutMeasureExecuted_ = true;
+    if (!isAdPositionAllowed(this.element, this.win)) {
+      user().warn(TAG, `<${this.element.tagName}> is not allowed to be ` +
+        `placed in elements with position:fixed: ${this.element}`);
+      return false;
+    }
     // OnLayoutMeasure can be called when page is in prerender so delay until
     // visible.  Assume that it is ok to call isValidElement as it should
     // only being looking at window, immutable properties (i.e. location) and
@@ -514,20 +539,19 @@ export class AmpA4A extends AMP.BaseElement {
       // TODO(kjwright): collapse?
       user().warn(TAG, this.element.getAttribute('type'),
           'Amp ad element ignored as invalid', this.element);
+      return false;
+    }
+    return true;
+  }
+
+  /** @override */
+  onLayoutMeasure() {
+    if (this.xOriginIframeHandler_) {
+      this.xOriginIframeHandler_.onLayoutMeasure();
+    }
+    if (this.adPromise_ || !this.shouldInitializePromiseChain_()) {
       return;
     }
-
-    // Increment unique promise ID so that if its value changes within the
-    // promise chain due to cancel from unlayout, the promise will be rejected.
-    this.promiseId_++;
-    const promiseId = this.promiseId_;
-    // Shorthand for: reject promise if current promise chain is out of date.
-    const checkStillCurrent = promiseId => {
-      if (promiseId != this.promiseId_) {
-        throw cancellation();
-      }
-    };
-
     // If in localDev `type=fake` Ad specifies `force3p`, it will be forced
     // to go via 3p.
     if (getMode().localDev &&
@@ -539,11 +563,27 @@ export class AmpA4A extends AMP.BaseElement {
       return;
     }
 
-    const sraPromise = this.useSra_ = this.shouldUseSra() ?
-      this.getSraElementResponsePromise_().then(adUrlToResponse => {
-        dev().assert(this.adUrl_);
-        return adUrlToResponse[this.adUrl_];
-      }) : null;
+    let adUrlPromiseResolver = null;
+    this.adUrlsPromise_ = new Promise(resolve => {
+      adUrlPromiseResolver = resolve;
+    });
+
+    const useSra =  this.shouldUseSra();
+    if (!useSra) {
+      // immediately resolve url for non-SRA traffic.
+      adUrlPromiseResolver();
+    }
+
+    // Increment unique promise ID so that if its value changes within the
+    // promise chain due to cancel from unlayout, the promise will be rejected.
+    const promiseId = ++this.promiseId_;
+    // Shorthand for: reject promise if current promise chain is out of date.
+    const checkStillCurrent = promiseId => {
+      if (promiseId != this.promiseId_) {
+        throw cancellation();
+      }
+    };
+
     // Return value from this chain: True iff rendering was "successful"
     // (i.e., shouldn't try to render later via iframe); false iff should
     // try to render later in iframe.
@@ -564,20 +604,31 @@ export class AmpA4A extends AMP.BaseElement {
           return /** @type {!Promise<?string>} */ (this.getAdUrl());
         })
         // This block returns the (possibly empty) response to the XHR request.
-        /** @return {!Promise<?Response>} */
+        /** @return {!Promise<?{bytes: !ArrayBuffer, headers: !Headers, status: number}>} */
         .then(adUrl => {
           checkStillCurrent(promiseId);
           this.adUrl_ = adUrl;
-          adUrlPromiseResolver();
+          adUrlPromiseResolver(adUrl);
           this.protectedEmitLifecycleEvent_('urlBuilt');
-          return adUrl && (sraPromise || this.sendXhrRequest_(adUrl));
+          if (!adUrl) {
+            return null;
+          }
+          if (useSra) {
+            return this.getSraElementResponsePromise_()
+              .then(sraUrlToElementCreatives => {
+                return sraUrlToElementCreatives[adUrl].then(adUrlToElementCreative => {
+                  return adUrlToElementCreative[adUrl];
+                });
+              });
+          }
+          return this.sendXhrRequest_(adUrl);
         })
         // The following block returns either the response (as a {bytes, headers}
         // object), or null if no response is available / response is empty.
-        /** @return {?Promise<?{bytes: !ArrayBuffer, headers: !Headers}>} */
+        /** @return {?Promise<?{AdResponseDef}>}>} */
         .then(fetchResponse => {
           checkStillCurrent(promiseId);
-          this.protectedEmitLifecycleEvent_((sraPromise ? 'sraA' : 'a') + 'dRequestEnd');
+          console.log('fetchResponse', fetchResponse);
           // If the response is null, we want to return null so that
           // unlayoutCallback will attempt to render via x-domain iframe,
           // assuming ad url or creative exist.
@@ -586,7 +637,7 @@ export class AmpA4A extends AMP.BaseElement {
           }
           // If the response has response code 204, or arrayBuffer is null,
           // collapse it.
-          if (!fetchResponse.arrayBuffer || fetchResponse.status == 204) {
+          if (!fetchResponse.creative || fetchResponse.status == 204) {
             this.forceCollapse();
             return Promise.reject(NO_CONTENT_RESPONSE);
           }
@@ -606,7 +657,7 @@ export class AmpA4A extends AMP.BaseElement {
           // fetchResponse.arrayBuffer(), the next step in the chain will
           // resolve it to a concrete value, but we'll lose track of
           // fetchResponse.headers.
-          return fetchResponse.arrayBuffer().then(bytes => {
+          return fetchResponse.creative.then(bytes => {
             if (bytes.byteLength == 0) {
               // The server returned no content. Instead of displaying a blank
               // rectangle, we collapse the slot instead.
@@ -616,14 +667,14 @@ export class AmpA4A extends AMP.BaseElement {
             return {
               bytes,
               headers: fetchResponse.headers,
-            };
+            };;
           });
         })
         // This block returns the ad creative and signature, if available; null
         // otherwise.
         /**
-         * @return {!Promise<?{AdResponseDef}>}
-         */
+        * @return {!Promise<?{AdResponseDef}>}
+        */
         .then(responseParts => {
           checkStillCurrent(promiseId);
           if (responseParts) {
@@ -874,6 +925,9 @@ export class AmpA4A extends AMP.BaseElement {
   layoutCallback() {
     // Promise may be null if element was determined to be invalid for A4A.
     if (!this.adPromise_) {
+      if (this.shouldInitializePromiseChain_()) {
+        dev().error(TAG, 'Null promise in layoutCallback');
+      }
       return Promise.resolve();
     }
     // There's no real throttling with A4A, but this is the signal that is
@@ -882,6 +936,7 @@ export class AmpA4A extends AMP.BaseElement {
     const layoutCallbackStart = this.getNow_();
     // Promise chain will have determined if creative is valid AMP.
     return this.adPromise_.then(creativeMetaData => {
+      console.log('layoutCallback post promise', creativeMetaData, this.creativeBody_);
       const delta = this.getNow_() - layoutCallbackStart;
       this.protectedEmitLifecycleEvent_('layoutAdPromiseDelay', {
         layoutAdPromiseDelay: Math.round(delta),
@@ -916,21 +971,41 @@ export class AmpA4A extends AMP.BaseElement {
     });
   }
 
+  /** @override **/
+  attemptChangeSize(newHeight, newWidth) {
+    // Store original size of slot in order to allow re-expansion on
+    // unlayoutCallback so that it is reverted to original size in case
+    // of resumeCallback.
+    this.originalSlotSize_ = this.originalSlotSize_ || this.getLayoutBox();
+    return super.attemptChangeSize(newHeight, newWidth).catch(() => {});
+  }
+
   /** @override  */
   unlayoutCallback() {
+    // Increment promiseId to cause any pending promise to cancel.
+    this.promiseId_++;
     this.protectedEmitLifecycleEvent_('adSlotCleared');
     this.uiHandler.setDisplayState(AdDisplayState.NOT_LAID_OUT);
+    if (this.originalSlotSize_) {
+      super.attemptChangeSize(
+        this.originalSlotSize_.height, this.originalSlotSize_.width)
+        .then(() => {
+          this.originalSlotSize_ = null;
+        })
+        .catch(err => {
+          // TODO(keithwrightbos): if we are unable to revert size, on next
+          // trigger of promise chain the ad request may fail due to invalid
+          // slot size.  Determine how to handle this case.
+          dev().warn(TAG, 'unable to revert to original size', err);
+        });
+    }
+
     this.isCollapsed_ = false;
 
     // Allow embed to release its resources.
     if (this.friendlyIframeEmbed_) {
       this.friendlyIframeEmbed_.destroy();
       this.friendlyIframeEmbed_ = null;
-    }
-
-    // Remove creative and reset to allow for creation of new ad.
-    if (!this.layoutMeasureExecuted_) {
-      return true;
     }
 
     // Remove rendering frame, if it exists.
@@ -943,15 +1018,13 @@ export class AmpA4A extends AMP.BaseElement {
     this.adUrl_ = null;
     this.creativeBody_ = null;
     this.isVerifiedAmpCreative_ = false;
+    this.fromResumeCallback = false;
     this.experimentalNonAmpCreativeRenderMethod_ =
         platformFor(this.win).isIos() ? XORIGIN_MODE.SAFEFRAME : null;
     if (this.xOriginIframeHandler_) {
       this.xOriginIframeHandler_.freeXOriginIframe();
       this.xOriginIframeHandler_ = null;
     }
-    this.layoutMeasureExecuted_ = false;
-    // Increment promiseId to cause any pending promise to cancel.
-    this.promiseId_++;
     return true;
   }
 
@@ -1027,11 +1100,11 @@ export class AmpA4A extends AMP.BaseElement {
    * Generate per element response objects based on SRA response.
    * TODO(keithwrightbos): error handling for SRA response?
    * @param {!Array<string>} adUrls of elements associted with SRA request.
-   * @param {Response} sraResponse response generated via url above.
-   * @return {!Promise<!Object<string, !Response>>} element ad url to its
-   *    response.
+   * @param {!NetworkResponse} unusedNetworkResponse for the SRA request
+   * @return {!Object<string, !Promise<!NetworkResponse>>} element ad url to its
+   *   creative information to be passed to extractCreativeAndSignature.
    */
-  processSraResponse(adUrls, response) {
+  processSraResponse(adUrls, unusedNetworkResponse) {
     throw new Error('processSraResponse not implemented!');
   }
 
@@ -1041,6 +1114,9 @@ export class AmpA4A extends AMP.BaseElement {
    */
   forceCollapse() {
     dev().assert(this.uiHandler);
+    // Store original size to allow for reverting on unlayoutCallback so that
+    // subsequent pageview allows for ad request.
+    this.originalSlotSize_ = this.originalSlotSize_ || this.getLayoutBox();
     this.uiHandler.setDisplayState(AdDisplayState.LOADING);
     this.uiHandler.setDisplayState(AdDisplayState.LOADED_NO_CONTENT);
     this.isCollapsed_ = true;
@@ -1074,7 +1150,7 @@ export class AmpA4A extends AMP.BaseElement {
    * Send ad request, extract the creative and signature from the response.
    * @param {string} adUrl Request URL to send XHR to.
    * @param {number=} sraElements for SRA requests, number of elements.
-   * @return {!Promise<?../../../src/service/xhr-impl.FetchResponse>}
+   * @return {!Promise<NetworkResponse>}
    * @private
    */
   sendXhrRequest_(adUrl, sraElements) {
@@ -1091,6 +1167,16 @@ export class AmpA4A extends AMP.BaseElement {
     };
     return xhrFor(this.win)
         .fetch(adUrl, xhrInit)
+        .then(response => {
+          this.protectedEmitLifecycleEvent_('adRequestEnd');
+          console.log('sendXhrRequest_', response);
+          // TODO(keithwrightbos) - what does arrayBuffer return for non-200?
+          return {
+            creative: response.arrayBuffer(),
+            headers: response.headers,
+            status: response.status
+          };
+        })
         .catch(unusedReason => {
           // If an error occurs, let the ad be rendered via iframe after delay.
           // TODO(taymonbeal): Figure out a more sophisticated test for deciding

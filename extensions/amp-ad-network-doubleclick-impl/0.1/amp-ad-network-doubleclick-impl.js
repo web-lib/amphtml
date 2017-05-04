@@ -154,6 +154,7 @@ export class AmpAdNetworkDoubleclickImpl extends AmpA4A {
 
   /** @override */
   extractCreativeAndSignature(responseText, responseHeaders) {
+    console.log('extractCreativeAndSignature', responseText, responseHeaders);
     setGoogleLifecycleVarsFromHeaders(responseHeaders, this.lifecycleReporter_);
     this.ampAnalyticsConfig_ = extractAmpAnalyticsConfig(
         this,
@@ -222,6 +223,29 @@ export class AmpAdNetworkDoubleclickImpl extends AmpA4A {
       width: `${this.size_.width}px`,
       height: `${this.size_.height}px`,
     });
+  }
+
+  /** @override */
+  shouldUseSra() {
+    return true;
+  }
+
+  /** @override */
+  constructSraRequestUrls(adUrls) {
+    console.log('constructSraRequestUrls', adUrls);
+    const iuParts = [];
+
+    const result = {};
+    result[adUrls[0]] = adUrls;
+    return result;
+  }
+
+  /** @override */
+  processSraResponse(adUrls, networkResponse) {
+    const result = {};
+    adUrls.forEach(adUrl => result[adUrl] = networkResponse);
+    console.log('processSraResponse', networkResponse, result);
+    return result;
   }
 
   /**

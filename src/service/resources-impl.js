@@ -287,7 +287,7 @@ export class Resources {
    * @return {!Promise<!Array<!Resource>>}
    */
   getMeasuredResources(hostWin, filterFn) {
-    console.log('getMeasuredResources', hostWin);
+    console.log('getMeasuredResources', hostWin, filterFn);
     // First, wait for the `ready-scan` signal. Waiting for each element
     // individually is too expensive and `ready-scan` will cover most of
     // the initially parsed elements.
@@ -306,9 +306,11 @@ export class Resources {
         }
       });
       return Promise.all(measurePromiseArray);
-    }).then(() => this.resources_.filter(r =>
-        r.hostWin == hostWin && !r.hasOwner() && r.hasBeenMeasured() &&
-        filterFn(r)));
+    }).then(() => this.resources_.filter(r => {
+      console.log('sub-filter', r.hostWin == hostWin, !r.hasOwner(), r.hasBeenMeasured());
+      return r.hostWin == hostWin && !r.hasOwner() && r.hasBeenMeasured() &&
+        filterFn(r);
+    }));
   }
 
   /**
