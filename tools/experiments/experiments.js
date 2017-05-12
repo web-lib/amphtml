@@ -285,6 +285,11 @@ const EXPERIMENTS = [
     name: 'New ad loader version 2',
     cleanupIssue: 'https://github.com/ampproject/amphtml/issues/8261',
   },
+  {
+    id: 'a4a-measure-get-ad-urls',
+    name: 'DoubleClick Fast Fetch measure delay from after first slot ad url ' +
+          'generation to last slot as precursor for SRA support',
+  },
 ];
 
 if (getMode().localDev) {
