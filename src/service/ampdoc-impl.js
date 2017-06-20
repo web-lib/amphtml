@@ -86,6 +86,9 @@ export class AmpDocService {
     if (isSingleDoc) {
       this.singleDoc_ = new AmpDocSingle(win);
     }
+
+    /** @private {!Object<string, !./url-replacements-impl.SyncResolverDef>} */
+    this.anchorClickListenerBinding_ = {};
   }
 
   /**
@@ -95,6 +98,16 @@ export class AmpDocService {
    */
   isSingleDoc() {
     return !!this.singleDoc_;
+  }
+
+  /**
+   * Binding of macro to function used as part of any installed anchor click
+   * listener.
+   * @return {!Object<string, !./url-replacements-impl.SyncResolverDef>}
+   * @see src/anchor-click-interceptor#installAnchorClickInterceptor
+   */
+  getAnchorClickListenerBinding() {
+    return this.anchorClickListenerBinding_;
   }
 
   /**

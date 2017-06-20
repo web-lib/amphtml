@@ -52,14 +52,14 @@ function maybeExpandUrlParams(ampdoc, e) {
   if (!hrefToExpand) {
     return;
   }
-  const vars = {
+  const vars = Object.assign({
     'CLICK_X': () => {
       return e.pageX;
     },
     'CLICK_Y': () => {
       return e.pageY;
     },
-  };
+  }, ampdoc.getAnchorClickListenerBinding());
   const newHref = urlReplacementsForDoc(ampdoc).expandSync(
       hrefToExpand, vars, undefined, /* opt_whitelist */ {
         // For now we only allow to replace the click location vars
