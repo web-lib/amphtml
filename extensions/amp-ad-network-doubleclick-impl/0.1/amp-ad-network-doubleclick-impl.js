@@ -366,6 +366,16 @@ export class AmpAdNetworkDoubleclickImpl extends AmpA4A {
   }
 
   /** @override */
+  removeAmpCreativeInUnlayoutCallback() {
+    // Do not allow AMP creatives to survive unlayoutCallback if SRA and
+    // at least one slot is not an AMP creative.  Otherwise, ad request via
+    // resumeCallback will not include all slots causing SRA to no longer
+    // enforce mutual exclusivity.
+    return this.useSra_ && !!this.element.ownerDocument.querySelector(
+      'amp-ad[type="doubleclick"] iframe[src]');
+  }
+
+  /** @override */
   unlayoutCallback() {
     super.unlayoutCallback();
     this.element.setAttribute('data-amp-slot-index',

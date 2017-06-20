@@ -956,9 +956,16 @@ export class AmpA4A extends AMP.BaseElement {
     return super.attemptChangeSize(newHeight, newWidth).catch(() => {});
   }
 
+  /** @return {boolean} whether unlayoutCallback should remove AMP creative. */
+  removeAmpCreativeInUnlayoutCallback() {
+    return false;
+  }
+
   /** @override  */
   unlayoutCallback() {
-    if (this.friendlyIframeEmbed_) {
+    // Do not remove AMP creatives as they can exist in a prerender state.
+    if (!this.removeAmpCreativeInUnlayoutCallback() &&
+        this.friendlyIframeEmbed_) {
       return false;
     }
     // Increment promiseId to cause any pending promise to cancel.
