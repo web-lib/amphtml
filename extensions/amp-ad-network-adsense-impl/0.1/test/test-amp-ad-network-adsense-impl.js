@@ -631,6 +631,7 @@ describes.sandboxed('amp-ad-network-adsense-impl', {}, () => {
     });
     it('returns the right URL', () => {
       new AmpAd(element).upgradeCallback();
+      element.setAttribute('data-ad-slot', 'some_slot');
       return impl.getAdUrl().then(url => {
         [
           /^https:\/\/googleads\.g\.doubleclick\.net\/pagead\/ads/,
@@ -642,6 +643,7 @@ describes.sandboxed('amp-ad-network-adsense-impl', {}, () => {
           /(\?|&)w=\d+(&|$)/,
           /(\?|&)h=\d+(&|$)/,
           /(\?|&)d_imp=1(&|$)/,
+          /(\?|&)iu=some_slot(&|$)/,
           /(\?|&)dt=\d+(&|$)/,
           /(\?|&)ifi=\d+(&|$)/,
           /(\?|&)adf=\d+(&|$)/,
